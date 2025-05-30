@@ -22,7 +22,7 @@
 #define LIGHTSABER_POWERDOWN_FREQ 200
 
 // Додамо константи для меча
-#define SABER_LENGTH 10
+#define SABER_LENGTH 30
 #define SABER_ANIMATION_SPEED 30
 #define POWER_ANIMATION_STEP 3
 
@@ -117,7 +117,7 @@ void setup() {
   delay(50);
   lastButtonState = digitalRead(ENCODER_SW);
 
-  currentMode = NORMAL;
+  currentMode = INTERACTIVE;
   changeBrightness = false;
   currentEffect = 0;
   currentFlasher = POLICE_FLASHER;
@@ -266,40 +266,60 @@ void lightsaberEffect() {
   if (now - lastUpdate < SABER_ANIMATION_SPEED) return;
   lastUpdate = now;
 
-  // Анімація запалювання/затухання
+  // Анімація тільки при запалюванні/затуханні
   if (saberPowering) {
     if (saberActive) {
-      // Запалювання
+      // Запалювання - плавне збільшення яскравості
       saberBrightness = min(255, saberBrightness + POWER_ANIMATION_STEP);
-      if (saberBrightness == 255) saberPowering = false;
+      if (saberBrightness == 255) {
+        saberPowering = false;
+        // Додатковий ефект "удар" при повному запалюванні
+        playTone(LIGHTSABER_HUM_FREQ + 50, 100);
+      }
     } else {
-      // Затухання
+      // Затухання - плавне зменшення яскравості
       saberBrightness = max(0, saberBrightness - POWER_ANIMATION_STEP);
-      if (saberBrightness == 0) saberPowering = false;
+      if (saberBrightness == 0) {
+        saberPowering = false;
+        // Додатковий ефект при повному затуханні
+        playTone(LIGHTSABER_HUM_FREQ - 30, 80);
+      }
     }
   }
 
-  // Очищаємо стрічку
   strip.clear();
 
-  // Малюємо меч, якщо він не вимкнений
   if (saberBrightness > 0) {
-    // Рухаємо позицію меча
-    saberPosition = (saberPosition + 1) % LED_COUNT;
-    
-    // Малюємо меч з градієнтом
-    for (int i = 0; i < SABER_LENGTH; i++) {
-      uint8_t pos = (saberPosition + i) % LED_COUNT;
-      uint8_t brightness = saberBrightness * (SABER_LENGTH - i) / SABER_LENGTH;
-      strip.setPixelColor(pos, strip.ColorHSV(saberHue, 255, brightness));
-    }
-    
-    // Яскравий кінчик
-    strip.setPixelColor(saberPosition, strip.ColorHSV(saberHue, 200, saberBrightness));
-    
-    // Випадкові звукові ефекти
-    if (random(10) < 2) {
-      playTone(LIGHTSABER_HUM_FREQ + random(-30, 30), 50 + random(50));
+    // Статичне відображення меча (без руху), якщо не в режимі анімації
+    if (!saberPowering) {
+      // Просто статичний меч з градієнтом
+      for (int i = 0; i < SABER_LENGTH; i++) {
+        uint8_t pos = (saberPosition + i) % LED_COUNT;
+        uint8_t brightness = saberBrightness * (SABER_LENGTH - i) / SABER_LENGTH;
+        strip.setPixelColor(pos, strip.ColorHSV(saberHue, 255, brightness));
+      }
+      strip.setPixelColor(saberPosition, strip.ColorHSV(saberHue, 200, saberBrightness));
+      
+      // Випадкові дуже тихі звукові ефекти (лише гул)
+      if (random(100) < 2) {  // Дуже рідкісні
+        playTone(LIGHTSABER_HUM_FREQ + random(-10, 10), 30);
+      }
+    } 
+    else {
+      // Анімація руху ТІЛЬКИ під час запалювання/затухання
+      saberPosition = (saberPosition + 1) % LED_COUNT;
+      
+      for (int i = 0; i < SABER_LENGTH; i++) {
+        uint8_t pos = (saberPosition + i) % LED_COUNT;
+        uint8_t brightness = saberBrightness * (SABER_LENGTH - i) / SABER_LENGTH;
+        strip.setPixelColor(pos, strip.ColorHSV(saberHue, 255, brightness));
+      }
+      strip.setPixelColor(saberPosition, strip.ColorHSV(saberHue, 200, saberBrightness));
+      
+      // Більш активні звукові ефекти під час анімації
+      if (random(20) < 3) {
+        playTone(LIGHTSABER_HUM_FREQ + random(-20, 20), 50 + random(50));
+      }
     }
   }
 
