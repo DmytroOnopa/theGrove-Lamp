@@ -1,6 +1,8 @@
 #include <Adafruit_NeoPixel.h>
 #include <EEPROM.h>
 #include "segment_driver.h"
+#include <Encoder.h>
+#include <FastLED.h>
 
 #define LED_PIN    8
 #define LED_COUNT  30
@@ -27,6 +29,7 @@
 #define POWER_ANIMATION_STEP 3
 
 Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
+Encoder encoder(ENCODER_CLK, ENCODER_DT);
 
 int brightness = 128;
 uint16_t hue = 0;
@@ -36,6 +39,13 @@ uint8_t currentEffect = 0;
 const uint8_t numEffects = 3;
 
 int lastClk = HIGH;
+
+int lastBrightness = -1;
+
+unsigned long lastDisplaySwitch = 0;
+const unsigned long brightnessDisplayDuration = 1500; // показуємо яскравість 1.5 секунди
+
+bool showingBrightness = false;
 
 #define ADDR_HUE_L 1
 #define ADDR_HUE_H 2
@@ -117,7 +127,7 @@ void setup() {
   delay(50);
   lastButtonState = digitalRead(ENCODER_SW);
 
-  currentMode = INTERACTIVE;
+  currentMode = NORMAL;
   changeBrightness = false;
   currentEffect = 0;
   currentFlasher = POLICE_FLASHER;
@@ -142,39 +152,107 @@ void loop() {
       break;
     case INTERACTIVE: lightsaberEffect(); break;
   }
-  displayMode(currentMode);
+  updateDisplay(); // Оновлюємо індикатор, щоб він не гас
+}
+
+void updateDisplay() {
+  unsigned long now = millis();
+
+  if (showingBrightness) {
+    segment_showNumber(brightness);
+    if (now - lastDisplaySwitch > brightnessDisplayDuration) {
+      showingBrightness = false;
+    }
+  } else {
+    switch(currentMode) {
+      case NORMAL:
+        segment_showChar(1, 'L');
+        break;
+      case ANIMATION:
+        segment_showChar(2, 'A');
+        break;
+      case POLICE:
+        segment_showChar(1, 'S');
+        segment_showChar(2, 'I');
+        segment_showChar(3, 'G');
+        break;
+      case INTERACTIVE:
+        segment_showChar(1, 'G');
+        segment_showChar(2, 'U');
+        segment_showChar(3, 'F');
+        break;
+      default:
+        segment_showNumber(currentMode);
+        break;
+    }
+  }
+}
+
+void showHoldEffect() {
+  // Створюємо зелений пульс по центру стрічки
+  static uint8_t pulse = 0;
+  static int8_t dir = 5;
+
+  pulse += dir;
+  if (pulse >= 255 || pulse <= 0) dir = -dir;
+
+  strip.clear();
+  for (int i = 14; i <= 15; i++) {
+    strip.setPixelColor(i, strip.Color(0, pulse, 0));  // зелений
+  }
+  strip.show();
 }
 
 void handleEncoder() {
-  int currentClk = digitalRead(ENCODER_CLK);
-  if (currentClk != lastClk && currentClk == LOW) {
-    int dtState = digitalRead(ENCODER_DT);
-    if (dtState != currentClk) {
-      if (changeBrightness && brightness < 250) brightness += 5;
-      else if (!changeBrightness) hue = (hue + HUE_STEP) % 65536;
-    } else {
-      if (changeBrightness && brightness > 5) brightness -= 5;
-      else if (!changeBrightness) hue = (hue + 65536 - HUE_STEP) % 65536;
-    }
-    encoderClick();
-    saveSettings();
-    Serial.print("Яскравість: "); Serial.print(brightness);
-    Serial.print(" | Відтінок: "); Serial.println(hue);
+  static long lastEncoderPos = 0;
+  static unsigned long lastChangeTime = 0;
+  const unsigned long debounceTime = 5; // 5 мс для фільтрації шумів
 
-    if (currentMode == NORMAL) updateLEDs();
+  long newEncoderPos = encoder.read() / 4;  // з твоїм масштабом
+
+  if (newEncoderPos != lastEncoderPos) {
+    unsigned long now = millis();
+    if (now - lastChangeTime > debounceTime) { // простий дебаунс
+      int delta = newEncoderPos - lastEncoderPos;
+
+      if (changeBrightness) {
+        brightness += delta * 5;
+        brightness = constrain(brightness, 0, 255);
+        strip.setBrightness(brightness);
+        strip.show();
+
+        showingBrightness = true;
+        lastDisplaySwitch = now;
+
+        encoderClick();
+      } else {
+        int newHue = (int)hue + delta * (int)HUE_STEP;
+        if (newHue < 0) newHue += 65536;
+        hue = newHue % 65536;
+
+        if (!showingBrightness) {
+          segment_showNumber(currentMode);
+        }
+
+        encoderClick();
+      }
+
+      lastEncoderPos = newEncoderPos;
+      lastChangeTime = now;
+    }
   }
-  lastClk = currentClk;
 }
 
 void handleButton() {
   static unsigned long lastPressTime = 0;
-  static uint8_t clickCount = 0;
+  static bool buttonHeld = HIGH;
+  static bool pressInProgress = false;
+  static unsigned long pressStart = 0;
   const unsigned long clickTimeout = 400;
+  const unsigned long longPressDuration = 500;
   bool reading = digitalRead(ENCODER_SW);
 
-  static unsigned long pressStart = 0;
-  static bool pressInProgress = false;
-
+  // Debounce
   if (reading != lastButtonState) {
     lastDebounceTime = millis();
   }
@@ -184,54 +262,43 @@ void handleButton() {
       buttonHeld = reading;
 
       if (buttonHeld == LOW) {
+        // Звуковий фідбек одразу при натисканні
+        encoderClick();
+
         pressStart = millis();
         pressInProgress = true;
       } else {
         unsigned long pressDuration = millis() - pressStart;
         pressInProgress = false;
 
-        if (pressDuration < 500) {
-          clickCount++;
-          lastPressTime = millis();
+        if (pressDuration >= longPressDuration) {
+          longBeep(); // довгий звук
+          currentMode = (Mode)((currentMode + 1) % 4);
         } else {
-          // довге натискання — обробка лише для INTERACTIVE
-          if (currentMode == INTERACTIVE) {
-            saberHue = (saberHue + 32) % 256;
-            playTone(LIGHTSABER_SWING_FREQ, 150);
+          shortBeep(); // короткий звук
+          if (currentMode == ANIMATION)
+            currentEffect = (currentEffect + 1) % numEffects;
+          else if (currentMode == POLICE)
+            currentFlasher = (currentFlasher == POLICE_FLASHER) ? YELLOW_BLUE_FLASHER : POLICE_FLASHER;
+          else if (currentMode == INTERACTIVE) {
+            saberActive = !saberActive;
+            saberPowering = true;
+            if (saberActive)
+              playTone(LIGHTSABER_POWERUP_FREQ, 300);
+            else
+              playTone(LIGHTSABER_POWERDOWN_FREQ, 300);
+          } else {
+            changeBrightness = !changeBrightness;
           }
         }
       }
     }
-  }
 
-  // обробка clickCount (всегда працює)
-  if (clickCount > 0 && (millis() - lastPressTime) > clickTimeout) {
-    switch (clickCount) {
-      case 1:
-        shortBeep();
-        if (currentMode == ANIMATION)
-          currentEffect = (currentEffect + 1) % numEffects;
-        else if (currentMode == POLICE)
-          currentFlasher = (currentFlasher == POLICE_FLASHER) ? YELLOW_BLUE_FLASHER : POLICE_FLASHER;
-        else if (currentMode == INTERACTIVE) {
-          // коротке натискання — вкл/викл меч
-          saberActive = !saberActive;
-          saberPowering = true;
-          if (saberActive)
-            playTone(LIGHTSABER_POWERUP_FREQ, 300);
-          else
-            playTone(LIGHTSABER_POWERDOWN_FREQ, 300);
-        } else {
-          changeBrightness = !changeBrightness;
-        }
-        break;
-
-      case 2:
-        longBeep();
-        currentMode = (Mode)((currentMode + 1) % 6);  // або скільки у тебе їх є
-        break;
+    // Поки тримається кнопка — показуємо індикацію
+    if (pressInProgress && (millis() - pressStart > 200)) {
+      segment_showChar(2,'H'); // показуємо "H" на індикаторі
+      showHoldEffect();      // запускаємо візуальний ефект
     }
-    clickCount = 0;
   }
 
   lastButtonState = reading;
@@ -254,8 +321,8 @@ void updateLEDs() {
 }
 
 void displayMode(Mode mode) {
-  segment_showDigit(0, 'M');
-  segment_showDigit(1, '0' + mode);
+  segment_showChar(1, 't');
+  segment_showChar(2, '0' + mode);
 }
 
 // Оновлюємо lightsaberEffect()
