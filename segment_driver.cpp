@@ -138,14 +138,18 @@ void segment_showCustom(uint8_t digitIndex, const uint8_t pattern[7]) {
 
 void segment_clearDigit(uint8_t digitIndex) {
   if (digitIndex < 1 || digitIndex > 3) return;
+  
+  // Спосіб 1: через segmentIndexMap (якщо ви його використовуєте)
   for (uint8_t i = 0; i < 7; i++) {
-    // просто не активуємо сегмент, або можна явно гасити:
-    // segment_clear(); - це гасить всі, тому треба робити по сегменту
-    // але у тебе немає прямої функції гасіння одного сегмента
-    // тому зробимо просто пропуск — нічого не активуємо
+    uint8_t segNum = segmentIndexMap[digitIndex-1][i];
+    digitalWrite(segments[segNum].positivePin, LOW);
+    digitalWrite(segments[segNum].negativePin, LOW);
   }
-  // Якщо треба – можна викликати segment_clear() щоб вимкнути всі сегменти,
-  // але тоді гасимо всі, і доведеться перезапускати індикатор
+  
+  // Або спосіб 2: через пряме вимикання (якщо немає segmentIndexMap)
+  // for (int pin = D2; pin <= D7; pin++) {
+  //   digitalWrite(pin, LOW);
+  // }
 }
 
 void segment_showNumber(uint16_t number) {
@@ -172,21 +176,27 @@ void segment_showNumber(uint16_t number) {
 }
 
 void showBrightnessBar(uint8_t brightness) {
-  uint8_t level = map(brightness, 0, 255, 0, 9);
-  uint8_t symbols[3] = {0, 0, 0}; // Індекси в customChars
-
-  for (uint8_t i = 0; i < 3; i++) {
-    if (level >= (i + 1) * 3) {
-      symbols[i] = 3; // H (повний)
-    } else if (level >= i * 3 + 1) {
-      symbols[i] = 2; // n (середній)
-    } else {
-      symbols[i] = 0; // ' ' (пусто)
+  uint8_t level = map(brightness, 0, 255, 0, 9); // Конвертація у 10 рівнів
+  
+  // Очищаємо індикатор перед оновленням
+  segment_clear();
+  
+  // Відображаємо градієнт на 3 розрядах
+  for (uint8_t digit = 0; digit < 3; digit++) {
+    if (level >= (digit + 1) * 3) {
+      // Повністю заповнений розряд
+      segment_showCustom(digit + 1, (const uint8_t[]){1,1,1,1,1,1,1});
+    } 
+    else if (level > digit * 3) {
+      // Частково заповнений
+      uint8_t segments = level - digit * 3;
+      uint8_t pattern[7] = {0};
+      for (uint8_t i = 0; i < segments; i++) {
+        pattern[i] = 1;
+      }
+      segment_showCustom(digit + 1, pattern);
     }
-  }
-
-  for (uint8_t i = 0; i < 3; i++) {
-    segment_showChar(i + 1, " nH"[symbols[i]]); // Виводимо символ
+    delay(2); // Невелика затримка для стабільності
   }
 }
 
@@ -215,5 +225,26 @@ void segment_progressBar(uint8_t percent) {
   for (uint8_t i = 0; i < activeCount; i++) {
     segment_activate(i);
     delay(10);
+  }
+}
+
+void segment_showGradient(uint8_t level) {
+  level = constrain(level, 0, 9);
+  
+  // Визначаємо, які сегменти активувати
+  uint8_t pattern[3][7] = {
+    {0,0,0,0,0,0,0}, // Пусто
+    {0,0,0,1,0,0,0}, // Нижня риска (_)
+    {0,0,1,1,0,0,0}  // Напівсегмент (n)
+  };
+
+  for(uint8_t digit = 0; digit < 3; digit++) {
+    uint8_t fillLevel = (level > digit*3) ? min(level-digit*3, 3) : 0;
+    
+    if(fillLevel == 0) {
+      segment_clearDigit(digit+1);
+    } else {
+      segment_showCustom(digit+1, pattern[fillLevel]);
+    }
   }
 }

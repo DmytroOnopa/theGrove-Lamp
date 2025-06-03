@@ -28,6 +28,9 @@
 #define SABER_ANIMATION_SPEED 30
 #define POWER_ANIMATION_STEP 3
 
+unsigned long lastHueSwitch = 0;
+bool showingHue = false;
+
 Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
 Encoder encoder(ENCODER_CLK, ENCODER_DT);
 
@@ -47,8 +50,12 @@ const unsigned long brightnessDisplayDuration = 1500; // показуємо яс
 
 bool showingBrightness = false;
 
-#define ADDR_HUE_L 1
+#define ADDR_BRIGHTNESS 0   // 1 байт
+#define ADDR_HUE_L 1        // 2 байти для hue
 #define ADDR_HUE_H 2
+#define ADDR_MODE 3         // 1 байт
+#define ADDR_EFFECT 4       // 1 байт
+#define ADDR_FLASHER 5      // 1 байт
 
 #define HUE_STEP 512
 
@@ -82,14 +89,29 @@ uint8_t saberHue = 96; // Синій за замовчуванням
 uint8_t saberBrightness = 0;
 
 void saveSettings() {
-  EEPROM.update(ADDR_HUE_L, hue & 0xFF);
-  EEPROM.update(ADDR_HUE_H, hue >> 8);
+  safeEEPROMUpdate(ADDR_BRIGHTNESS, brightness);
+  safeEEPROMUpdate(ADDR_HUE_L, hue & 0xFF);
+  safeEEPROMUpdate(ADDR_HUE_H, hue >> 8);
+  safeEEPROMUpdate(ADDR_MODE, (uint8_t)currentMode);
+  safeEEPROMUpdate(ADDR_EFFECT, currentEffect);
+  safeEEPROMUpdate(ADDR_FLASHER, (uint8_t)currentFlasher);
 }
 
 void loadSettings() {
+  brightness = EEPROM.read(ADDR_BRIGHTNESS);
+  if (brightness == 255) brightness = 128; // Значення за замовчуванням при першому запуску
+  
   uint8_t l = EEPROM.read(ADDR_HUE_L);
   uint8_t h = EEPROM.read(ADDR_HUE_H);
   hue = (h << 8) | l;
+  
+  currentMode = (Mode)EEPROM.read(ADDR_MODE);
+  if (currentMode > INTERACTIVE) currentMode = NORMAL; // Перевірка коректності
+  
+  currentEffect = EEPROM.read(ADDR_EFFECT);
+  if (currentEffect >= numEffects) currentEffect = 0;
+  
+  currentFlasher = (FlasherType)EEPROM.read(ADDR_FLASHER);
 }
 
 void playTone(uint16_t frequency, uint32_t duration) {
@@ -110,6 +132,12 @@ void encoderClick() {
   playTone(ENCODER_CLICK_FREQ, 20);
 }
 
+void safeEEPROMUpdate(int address, uint8_t newValue) {
+  if (EEPROM.read(address) != newValue) {
+    EEPROM.update(address, newValue);
+  }
+}
+
 void setup() {
   pinMode(ENCODER_CLK, INPUT_PULLUP);
   pinMode(ENCODER_DT, INPUT_PULLUP);
@@ -122,15 +150,21 @@ void setup() {
   strip.begin();
   strip.show();
 
-  loadSettings();
+  // Ініціалізація EEPROM з дефолтними значеннями при першому запуску
+  if (EEPROM.read(ADDR_BRIGHTNESS) == 255) {
+    brightness = 128;
+    hue = 0;
+    currentMode = NORMAL;
+    currentEffect = 0;
+    currentFlasher = POLICE_FLASHER;
+    saveSettings();
+  } else {
+    loadSettings();
+  }
 
+  strip.setBrightness(brightness); // Встановлюємо завантажену яскравість
   delay(50);
   lastButtonState = digitalRead(ENCODER_SW);
-
-  currentMode = NORMAL;
-  changeBrightness = false;
-  currentEffect = 0;
-  currentFlasher = POLICE_FLASHER;
 
   testIndicator();
   shortBeep();
@@ -205,51 +239,54 @@ void showHoldEffect() {
 
 void handleEncoder() {
   static int8_t lastState = 0;
-  static int8_t counter = 0; // Змінимо на знаковий тип
+  static int8_t counter = 0;
   const uint8_t threshold = 3;
   static unsigned long lastDisplayUpdate = 0;
 
-  // Читання стану енкодера з підтяжкою
+  // Читання стану енкодера
   bool clk = digitalRead(ENCODER_CLK);
   bool dt = digitalRead(ENCODER_DT);
-  
-  // Визначення поточного стану
   int8_t currentState = (clk << 1) | dt;
 
-  // Масив переходів для визначення напрямку
   const int8_t transitions[16] = {
-     0, -1,  1,  0,  // 00 -> [00,01,10,11]
-     1,  0,  0, -1,  // 01 -> [00,01,10,11]
-    -1,  0,  0,  1,  // 10 -> [00,01,10,11]
-     0,  1, -1,  0   // 11 -> [00,01,10,11]
+    0, -1, 1, 0, 1, 0, 0, -1,
+    -1, 0, 0, 1, 0, 1, -1, 0
   };
 
-  // Визначення напрямку обертання
   int8_t direction = transitions[(lastState << 2) | currentState];
 
   if (direction != 0) {
     counter += direction;
     
-    // Реагуємо тільки при досягненні порогу
     if (abs(counter) >= threshold) {
-      int8_t actualChange = counter / abs(counter); // +1 або -1
+      int8_t actualChange = counter / abs(counter);
 
       if (changeBrightness) {
         brightness = constrain(brightness + actualChange * 10, 0, 255);
         strip.setBrightness(brightness);
-        segment_showNumber(brightness);
+        saveSettings(); // Додано
+        showBrightnessBar(brightness);
         lastDisplaySwitch = millis();
         showingBrightness = true;
       } else {
-        hue = (hue + actualChange * 500 + 65536) % 65536; // Додаємо 65536 для уникнення від'ємних значень
-        if (!showingBrightness) {
-          segment_showChar(1, 'C');
-        }
+        hue = (hue + actualChange * 500 + 65536) % 65536;
+        saveSettings(); // Додано
+
+        // Відображення кольору (спрощена версія)
+        segment_showChar(1, 'H'); // Показуємо що змінюємо Hue
+        
+        // Виправлений варіант відображення значення
+        uint16_t hueValue = hue / 8192; // 0-7
+        segment_showChar(3, '0' + hueValue);   // Відображаємо у всіх розрядах
+        // Або альтернатива:
+        // segment_showNumber(hueValue); // Відображаємо тільки в останньому розряді
+        
+        lastHueSwitch = millis();
+        showingHue = true;
       }
       
       counter = 0;
       encoderClick();
-      lastDisplayUpdate = millis();
     }
   }
   
@@ -258,7 +295,13 @@ void handleEncoder() {
   // Автоматичне приховування яскравості
   if (showingBrightness && (millis() - lastDisplaySwitch > 1500)) {
     showingBrightness = false;
-    updateDisplay(); // Повертаємо відображення режиму
+    updateDisplay();
+  }
+  
+  // Автоматичне приховування кольору
+  if (showingHue && (millis() - lastHueSwitch > 1500)) {
+    showingHue = false;
+    updateDisplay();
   }
 }
 
@@ -293,19 +336,23 @@ void handleButton() {
         if (pressDuration >= longPressDuration) {
           longBeep(); // довгий звук
           currentMode = (Mode)((currentMode + 1) % 4);
+          saveSettings();
         } else {
           shortBeep(); // короткий звук
-          if (currentMode == ANIMATION)
+          if (currentMode == ANIMATION) {
             currentEffect = (currentEffect + 1) % numEffects;
-          else if (currentMode == POLICE)
+            saveSettings();
+          } else if (currentMode == POLICE) {
             currentFlasher = (currentFlasher == POLICE_FLASHER) ? YELLOW_BLUE_FLASHER : POLICE_FLASHER;
-          else if (currentMode == INTERACTIVE) {
+            saveSettings();
+          } else if (currentMode == INTERACTIVE) {
             saberActive = !saberActive;
             saberPowering = true;
-            if (saberActive)
+            if (saberActive) {
               playTone(LIGHTSABER_POWERUP_FREQ, 300);
-            else
+            } else {
               playTone(LIGHTSABER_POWERDOWN_FREQ, 300);
+            }
           } else {
             changeBrightness = !changeBrightness;
           }
