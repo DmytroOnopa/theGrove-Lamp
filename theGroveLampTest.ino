@@ -36,7 +36,7 @@ uint16_t hue = 0;
 bool changeBrightness = false;
 
 uint8_t currentEffect = 0;
-const uint8_t numEffects = 3;
+const uint8_t numEffects = 4;
 
 int lastClk = HIGH;
 
@@ -204,42 +204,61 @@ void showHoldEffect() {
 }
 
 void handleEncoder() {
-  static long lastEncoderPos = 0;
-  static unsigned long lastChangeTime = 0;
-  const unsigned long debounceTime = 5; // 5 мс для фільтрації шумів
+  static int8_t lastState = 0;
+  static int8_t counter = 0; // Змінимо на знаковий тип
+  const uint8_t threshold = 3;
+  static unsigned long lastDisplayUpdate = 0;
 
-  long newEncoderPos = encoder.read() / 4;  // з твоїм масштабом
+  // Читання стану енкодера з підтяжкою
+  bool clk = digitalRead(ENCODER_CLK);
+  bool dt = digitalRead(ENCODER_DT);
+  
+  // Визначення поточного стану
+  int8_t currentState = (clk << 1) | dt;
 
-  if (newEncoderPos != lastEncoderPos) {
-    unsigned long now = millis();
-    if (now - lastChangeTime > debounceTime) { // простий дебаунс
-      int delta = newEncoderPos - lastEncoderPos;
+  // Масив переходів для визначення напрямку
+  const int8_t transitions[16] = {
+     0, -1,  1,  0,  // 00 -> [00,01,10,11]
+     1,  0,  0, -1,  // 01 -> [00,01,10,11]
+    -1,  0,  0,  1,  // 10 -> [00,01,10,11]
+     0,  1, -1,  0   // 11 -> [00,01,10,11]
+  };
+
+  // Визначення напрямку обертання
+  int8_t direction = transitions[(lastState << 2) | currentState];
+
+  if (direction != 0) {
+    counter += direction;
+    
+    // Реагуємо тільки при досягненні порогу
+    if (abs(counter) >= threshold) {
+      int8_t actualChange = counter / abs(counter); // +1 або -1
 
       if (changeBrightness) {
-        brightness += delta * 5;
-        brightness = constrain(brightness, 0, 255);
+        brightness = constrain(brightness + actualChange * 10, 0, 255);
         strip.setBrightness(brightness);
-        strip.show();
-
+        segment_showNumber(brightness);
+        lastDisplaySwitch = millis();
         showingBrightness = true;
-        lastDisplaySwitch = now;
-
-        encoderClick();
       } else {
-        int newHue = (int)hue + delta * (int)HUE_STEP;
-        if (newHue < 0) newHue += 65536;
-        hue = newHue % 65536;
-
+        hue = (hue + actualChange * 500 + 65536) % 65536; // Додаємо 65536 для уникнення від'ємних значень
         if (!showingBrightness) {
-          segment_showNumber(currentMode);
+          segment_showChar(1, 'C');
         }
-
-        encoderClick();
       }
-
-      lastEncoderPos = newEncoderPos;
-      lastChangeTime = now;
+      
+      counter = 0;
+      encoderClick();
+      lastDisplayUpdate = millis();
     }
+  }
+  
+  lastState = currentState;
+
+  // Автоматичне приховування яскравості
+  if (showingBrightness && (millis() - lastDisplaySwitch > 1500)) {
+    showingBrightness = false;
+    updateDisplay(); // Повертаємо відображення режиму
   }
 }
 
@@ -429,9 +448,9 @@ void yellowBlueFlash() {
   unsigned long now = millis();
 
   // Повільніше оновлення фази
-  if (now - lastChange > 15) { // Замість 4ms для повільнішого руху
+  if (now - lastChange > 8) { // Замість 4ms для повільнішого руху
     lastChange = now;
-    phase += 0.12; // Зменшений крок для повільнішої зміни
+    phase += 0.20; // Зменшений крок для повільнішої зміни
     
     if (phase >= 2*PI) phase = 0; // Скидаємо на новий цикл
   }
@@ -467,8 +486,9 @@ float smoothWave(float x) {
 void runCurrentEffect() {
   switch (currentEffect) {
     case 0: runningDotEffect(); break;
-    case 1: mirrorFlow(); break;
-    case 2: lightningEffect(); break;
+    case 1: raveStormEffect(); break;
+    case 2: colorTornadoEffect(); break;
+    case 3: plasmaVortexEffect(); break;
   }
 }
 
@@ -497,84 +517,114 @@ void runningDotEffect() {
   }
 }
 
-void mirrorFlow() {
-  const int center = 15; // Центр стрічки (30 пікселів складено пополам)
-  static float pos = 0;
+void raveStormEffect() {
+  static unsigned long lastUpdate = 0;
+  static uint8_t fade = 0;
   
-  // Очищення стрічки (аналог fadeToBlackBy)
+  // Оновлення кожні 50ms (20 FPS)
+  if(millis() - lastUpdate < 50) return;
+  lastUpdate = millis();
+  
+  // Випадкові спалахи на 1/3 світлодіодів
+  if(random(3) == 0) { // 33% шанс спалаху
+    for(int i = 0; i < LED_COUNT/3; i++) {
+      int pixel = random(LED_COUNT);
+      uint16_t hue = random(65536); // Повний спектр
+      strip.setPixelColor(pixel, strip.ColorHSV(hue, 255, 255));
+    }
+  }
+  
+  // Плавне згасання всіх пікселів
   for(int i = 0; i < LED_COUNT; i++) {
-    strip.setPixelColor(i, strip.Color(0, 0, 0));
-  }
-  
-  // Генеруємо кольори, що рухаються від центру
-  for(int i = 0; i < center; i++) {
-    // Конвертуємо HSV в RGB (H - відтінок, S=255 - насиченість, V=255 - яскравість)
-    uint32_t color = strip.ColorHSV((uint32_t)(pos * 100 + i * 50), 255, 255);
+    uint32_t color = strip.getPixelColor(i);
+    uint8_t r = (color >> 16) & 0xFF;
+    uint8_t g = (color >> 8) & 0xFF;
+    uint8_t b = color & 0xFF;
     
-    // Кольори для першої половини
-    strip.setPixelColor(center - 1 - i, color);
-    // Дзеркальне відображення для другої половини
-    strip.setPixelColor(center + i, color);
+    r = max(0, r - 40);
+    g = max(0, g - 40);
+    b = max(0, b - 40);
+    
+    strip.setPixelColor(i, strip.Color(r, g, b));
   }
-  
-  pos += 0.5; // Швидкість анімації
-  if(pos > 25) pos = 0;
   
   strip.show();
-  delay(30);
 }
 
-void resetMeteor(int index) {
-  meteors[index].position = random(-20, -5);
-  meteors[index].brightness = random(150, 255);
-  meteors[index].speed = random(2, 5);
-  switch (random(3)) {
-    case 0: meteors[index].color = strip.Color(100, 100, 255); break;
-    case 1: meteors[index].color = strip.Color(150, 50, 255); break;
-    case 2: meteors[index].color = strip.Color(200, 200, 255); break;
-  }
-}
-
-void lightningEffect() {
+void colorTornadoEffect() {
+  static float offset = 0;
   static unsigned long lastUpdate = 0;
-  static bool initialized = false;
-
-  if (!initialized) {
-    for (int i = 0; i < 5; i++) {
-      resetMeteor(i);
-    }
-    initialized = true;
-  }
-
-  unsigned long now = millis();
   
-  if (now - lastUpdate > 30) {
-    lastUpdate = now;
-    strip.clear();
-
-    for (int i = 0; i < 5; i++) {
-      meteors[i].position += meteors[i].speed;
-      
-      if (meteors[i].position >= LED_COUNT + 10) {
-        resetMeteor(i);
-        continue;
-      }
-
-      for (int j = 0; j < 8; j++) {
-        int pos = meteors[i].position - j;
-        if (pos >= 0 && pos < LED_COUNT) {
-          uint8_t tailBrightness = meteors[i].brightness * (8 - j) / 8;
-          uint32_t color = meteors[i].color;
-          uint8_t r = (color >> 16) & 0xFF;
-          uint8_t g = (color >> 8) & 0xFF;
-          uint8_t b = color & 0xFF;
-          r = r * tailBrightness / 255;
-          g = g * tailBrightness / 255;
-          b = b * tailBrightness / 255;
-          strip.setPixelColor(pos, strip.Color(r, g, b));
-        }
-      }
+  // Оновлення кожні 30ms (~33 FPS)
+  if(millis() - lastUpdate < 30) return;
+  lastUpdate = millis();
+  
+  // Швидкість обертання (змініть для налаштування)
+  offset += 0.3;
+  if(offset > 100) offset = 0;
+  
+  for(int i = 0; i < LED_COUNT; i++) {
+    // Визначаємо позицію у спіралі
+    float pos;
+    if(i <= 14) {
+      pos = (float)i/14.0 * PI + offset;
+    } else {
+      pos = (float)(i-15)/14.0 * PI + offset;
     }
-    strip.show();
+    
+    // Генеруємо кольоровий градієнт
+    uint16_t hue = (uint16_t)(pos * 4000) % 65536;
+    uint8_t sat = 255;
+    uint8_t val = (sin(pos * 5.0) + 1.0) * 127;
+    
+    strip.setPixelColor(i, strip.ColorHSV(hue, sat, val));
   }
+  
+  strip.show();
+}
+
+// Нова анімація - plasmaVortexEffect
+void plasmaVortexEffect() {
+  static float offset = 0.0;
+  static unsigned long lastUpdate = 0;
+  const float speed = 0.08; // швидкість
+  const uint8_t brightness = 200;
+  
+  if (millis() - lastUpdate < 15) return; // ~66 FPS
+  lastUpdate = millis();
+
+  for (int i = 0; i < LED_COUNT; i++) {
+    // Визначаємо позицію у "вихорі" (враховуємо фізичне розташування)
+    float position;
+    if (i <= 14) {
+      position = map(i, 0, 14, 0, PI); // Ліва половина
+    } else {
+      position = map(i, 15, 29, PI, 2*PI); // Права половина (зеркально)
+    }
+    
+    // Генеруємо 3 накладені хвилі різних частот. upd.:
+    // Прискорили хвилі (множителі 2.0 -> 3.0)
+    float wave1 = sin(position * 3.0 + offset * 2.0);  // Було 2.0
+    float wave2 = cos(position * 4.0 - offset * 3.0);  // Було 3.0
+    float wave3 = sin(position * 1.0 + offset * 1.2);  // Було 0.5
+    
+    // Комбінуємо хвилі
+    float energy = (wave1 + wave2 + wave3) / 3.0; // -1..1
+    energy = (energy + 1.0) / 2.0; // 0..1
+    
+    // Яскраві кольори (від фіолетового до блакитного)
+ // Пришвидшили зміну кольорів (0.3 -> 0.5)
+    uint16_t hue = 45000 + 10000 * sin(offset * 0.5);  // Плавна зміна палітри. Було 0.3
+    uint8_t sat = 200 + 55 * cos(offset * 0.7);       // Коливання насиченості. Було 0.5
+    
+    // Підсилюємо ефект на кутах
+    if (i == 0 || i == 7 || i == 14 || i == 15 || i == 22 || i == 29) {
+      energy = min(1.0, energy * 1.5);
+    }
+    
+    strip.setPixelColor(i, strip.ColorHSV(hue, sat, energy * brightness));
+  }
+  
+  strip.show();
+  offset += speed;
 }
